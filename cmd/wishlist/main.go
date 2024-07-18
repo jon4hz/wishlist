@@ -253,7 +253,20 @@ func userConfigPaths() []string {
 		paths = append(paths, filepath.Join(home, ".ssh", "config"))
 	}
 
-	return append(paths, "/etc/ssh/ssh_config")
+	paths = append(paths, "/etc/ssh/ssh_config")
+
+	// list all files from /etc/ssh/ssh_config.d/
+	cfgFiles, err := os.ReadDir("/etc/ssh/ssh_config.d/")
+	if err != nil {
+		return paths
+	}
+	for _, cfgFile := range cfgFiles {
+		if !cfgFile.IsDir() {
+			paths = append(paths, "/etc/ssh/ssh_config.d/"+cfgFile.Name())
+		}
+	}
+
+	return paths
 }
 
 func applyHints(seed []*wishlist.Endpoint, hints []wishlist.EndpointHint) []*wishlist.Endpoint {
