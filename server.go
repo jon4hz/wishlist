@@ -2,8 +2,8 @@ package wishlist
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/promwish"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
@@ -25,7 +26,7 @@ func Serve(config *Config) error {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	if config.Port == 0 {
-		port, err := getFirstOpenPort(config.Listen, 22, 2222) //nolint:gomnd
+		port, err := getFirstOpenPort(config.Listen, 22, 2222) //nolint:mnd
 		if err != nil {
 			return fmt.Errorf("could not get an open port and none was provided: %w", err)
 		}
@@ -36,7 +37,7 @@ func Serve(config *Config) error {
 		config.Listen = "0.0.0.0"
 	}
 
-	if err := os.MkdirAll(".wishlist", 0o700); err != nil { //nolint:gomnd
+	if err := os.MkdirAll(".wishlist", 0o700); err != nil { //nolint:mnd
 		return fmt.Errorf("could not create .wishlist dir: %w", err)
 	}
 
@@ -76,20 +77,20 @@ func Serve(config *Config) error {
 			endpoint.Address = toAddress(config.Listen, atomic.AddInt64(&config.lastPort, 1))
 		}
 
-		// i don't see where close was declared before, linter bug maybe?
-		close, err := listenAndServe(config, *endpoint) //nolint:predeclared
-		if close != nil {
-			closes = append(closes, close)
+		// i don't see where closer was declared before, linter bug maybe?
+		closer, err := listenAndServe(config, *endpoint) //nolint:predeclared
+		if closer != nil {
+			closes = append(closes, closer)
 		}
 		if err != nil {
-			if err2 := closeAll(closes); err2 != nil {
+			if err2 := closeAll(closes); err2 != nil && !errors.Is(err2, ssh.ErrServerClosed) {
 				return multierror.Append(err, err2)
 			}
 			return err
 		}
 	}
 	<-done
-	log.Print("Stopping SSH servers")
+	log.Info("Stopping SSH servers")
 	return closeAll(closes)
 }
 
@@ -101,21 +102,21 @@ func listenAndServe(config *Config, endpoint Endpoint) (func() error, error) {
 	}
 	s.PublicKeyHandler = publicKeyAccessOption(config.Users)
 
-	log.Printf("Starting SSH server for %s on ssh://%s", endpoint.Name, endpoint.Address)
+	log.Info("Starting SSH server", "endpoint", endpoint.Name, "address", "ssh://"+endpoint.Address)
 	ln, err := net.Listen("tcp", endpoint.Address)
 	if err != nil {
 		return nil, err //nolint:wrapcheck
 	}
 	go func() {
-		if err := s.Serve(ln); err != nil {
-			log.Println("SSH server error:", err)
+		if err := s.Serve(ln); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+			log.Error("SSH server failed", "err", err)
 		}
 	}()
 
 	return func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //nolint:gomnd
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //nolint:mnd
 		defer func() { cancel() }()
-		return s.Shutdown(ctx) //nolint:wrapcheck
+		return s.Shutdown(ctx)
 	}, nil
 }
 
@@ -123,7 +124,7 @@ func listenAndServe(config *Config, endpoint Endpoint) (func() error, error) {
 func closeAll(closes []func() error) error {
 	var result error
 	for _, close := range closes {
-		if err := close(); err != nil {
+		if err := close(); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 			result = multierror.Append(result, err)
 		}
 	}
@@ -165,17 +166,17 @@ func publicKeyAccessOption(users []User) ssh.PublicKeyHandler {
 				for _, pubkey := range user.PublicKeys {
 					upk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
 					if err != nil {
-						log.Printf("invalid key for user %q: %v", user.Name, err)
+						log.Warn("invalid key", "user", user.Name, "err", err)
 						return false
 					}
 					if ssh.KeysEqual(upk, key) {
-						log.Printf("authorized %s@%s...", ctx.User(), pubkey[:30])
+						log.Info("authorized", "user", ctx.User(), "key", pubkey[:30])
 						return true
 					}
 				}
 			}
 		}
-		log.Printf("denied %s@%s", ctx.User(), key.Type())
+		log.Warn("denied", "user", ctx.User(), "key.type", key.Type())
 		return false
 	}
 }

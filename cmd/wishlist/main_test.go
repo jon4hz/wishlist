@@ -11,13 +11,15 @@ import (
 )
 
 func TestParseExampleYaml(t *testing.T) {
-	cfg, err := getConfig("../../_example/config.yaml")
+	input := "../../_example/config.yaml"
+	cfg, path, err := getConfig(input, nil)
 	require.NoError(t, err)
+	require.Equal(t, input, path)
 	require.Equal(t, "127.0.0.1", cfg.Listen)
 	require.Equal(t, int64(2223), cfg.Port)
 	require.Len(t, cfg.Endpoints, 1)
 	require.Equal(t, wishlist.Endpoint{
-		Name:    "appname",
+		Name:    "thename",
 		Address: "foo.local:2234",
 		Link: wishlist.Link{
 			Name: "Optional link name",
@@ -32,6 +34,7 @@ func TestParseExampleYaml(t *testing.T) {
 		Timeout:       10 * time.Second,
 		SetEnv:        []string{"FOO=bar", "BAR=baz"},
 		SendEnv:       []string{"LC_*", "LANG", "SOME_ENV"},
+		ProxyJump:     "user@host:22",
 	}, *cfg.Endpoints[0])
 	require.Len(t, cfg.Users, 1)
 	require.Equal(t, wishlist.User{
@@ -44,9 +47,10 @@ func TestParseExampleYaml(t *testing.T) {
 }
 
 func TestParseExampleSSHConfig(t *testing.T) {
-	cfg, err := getConfig("../../_example/config")
+	input := "../../_example/config"
+	cfg, path, err := getConfig(input, nil)
 	require.NoError(t, err)
-	require.NoError(t, err)
+	require.Equal(t, input, path)
 	require.Empty(t, cfg.Listen)
 	require.Empty(t, cfg.Port)
 	require.Len(t, cfg.Endpoints, 2)
@@ -61,6 +65,7 @@ func TestParseExampleSSHConfig(t *testing.T) {
 		RemoteCommand: "tmux a",
 		SendEnv:       []string{"FOO_*", "BAR_*"},
 		SetEnv:        []string{"HELLO=world", "BYE=world"},
+		ProxyJump:     "user@host:22",
 	}, *cfg.Endpoints[0])
 	require.Equal(t, wishlist.Endpoint{
 		Name:    "ssh.example.com",
@@ -82,35 +87,35 @@ func TestGetConfig(t *testing.T) {
 
 	t.Run("yaml", func(t *testing.T) {
 		t.Run("valid", func(t *testing.T) {
-			cfg, err := getConfig(filepath.Join(dir, "testdata/valid.yaml"))
+			cfg, _, err := getConfig(filepath.Join(dir, "testdata/valid.yaml"), nil)
 			require.NoError(t, err)
 			require.Equal(t, wishlist.Config{Listen: "127.0.0.1"}, cfg)
 		})
 
 		t.Run("invalid", func(t *testing.T) {
-			_, err := getConfig(filepath.Join(dir, "testdata/invalid.yaml"))
+			_, _, err := getConfig(filepath.Join(dir, "testdata/invalid.yaml"), nil)
 			require.Error(t, err)
 		})
 
 		t.Run("not found", func(t *testing.T) {
-			_, err := getConfig(filepath.Join(dir, "testdata/nope.yaml"))
+			_, _, err := getConfig(filepath.Join(dir, "testdata/nope.yaml"), nil)
 			require.NoError(t, err)
 		})
 	})
 
 	t.Run("ssh", func(t *testing.T) {
 		t.Run("valid", func(t *testing.T) {
-			_, err := getConfig(filepath.Join(dir, "testdata/valid"))
+			_, _, err := getConfig(filepath.Join(dir, "testdata/valid"), nil)
 			require.NoError(t, err)
 		})
 
 		t.Run("invalid", func(t *testing.T) {
-			_, err := getConfig(filepath.Join(dir, "testdata/invalid"))
+			_, _, err := getConfig(filepath.Join(dir, "testdata/invalid"), nil)
 			require.Error(t, err)
 		})
 
 		t.Run("not found", func(t *testing.T) {
-			_, err := getConfig(filepath.Join(dir, "testdata/nope"))
+			_, _, err := getConfig(filepath.Join(dir, "testdata/nope"), nil)
 			require.NoError(t, err)
 		})
 	})
@@ -152,4 +157,65 @@ func TestUserConfigPaths(t *testing.T) {
 			"/etc/ssh/ssh_config",
 		}, paths)
 	})
+}
+
+func TestApplyHints(t *testing.T) {
+	boolPtr := func(b bool) *bool {
+		return &b
+	}
+	result := applyHints([]*wishlist.Endpoint{
+		{
+			Name:    "foo.bar.local",
+			Address: "foo.bar.local:22",
+		},
+	}, []wishlist.EndpointHint{
+		{
+			Match: "match nothing",
+			User:  "nope",
+		},
+		{
+			Match:         "*.local",
+			Port:          "2345",
+			User:          "carlos",
+			ForwardAgent:  boolPtr(true),
+			RequestTTY:    boolPtr(true),
+			RemoteCommand: "tmux a",
+			Desc:          "The descriptions",
+			Link: wishlist.Link{
+				Name: "foo.bar",
+				URL:  "https://github.com/charmbracelet/wishlist",
+			},
+			SendEnv:                  []string{"FOO_*"},
+			SetEnv:                   []string{"FOO_TEST=bar"},
+			PreferredAuthentications: []string{"publickey"},
+			IdentityFiles:            []string{"~/.ssh/charm_id_ed25519"},
+			Timeout:                  time.Minute,
+		},
+		{
+			Match: "invalid.*******$$$\a\a\a",
+		},
+		{
+			Match: "foo.*.local",
+			Port:  "22234",
+		},
+	})
+	require.Len(t, result, 1)
+	require.Equal(t, wishlist.Endpoint{
+		Name:          "foo.bar.local",
+		Address:       "foo.bar.local:22234",
+		User:          "carlos",
+		ForwardAgent:  true,
+		RequestTTY:    true,
+		RemoteCommand: "tmux a",
+		Desc:          "The descriptions",
+		Link: wishlist.Link{
+			Name: "foo.bar",
+			URL:  "https://github.com/charmbracelet/wishlist",
+		},
+		SendEnv:                  []string{"FOO_*"},
+		SetEnv:                   []string{"FOO_TEST=bar"},
+		PreferredAuthentications: []string{"publickey"},
+		IdentityFiles:            []string{"~/.ssh/charm_id_ed25519"},
+		Timeout:                  time.Minute,
+	}, *result[0])
 }

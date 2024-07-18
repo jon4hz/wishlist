@@ -3,12 +3,13 @@ package wishlist
 import (
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 
 	"github.com/charmbracelet/keygen"
+	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
 	"github.com/charmbracelet/wishlist/home"
@@ -23,14 +24,36 @@ var errNoRemoteAgent = fmt.Errorf("no agent forwarded")
 // remoteBestAuthMethod returns an auth method.
 //
 // it first tries to use ssh-agent, if that's not available, it creates and uses a new key pair.
-func remoteBestAuthMethod(s ssh.Session) (gossh.AuthMethod, agent.Agent, closers, error) {
-	method, agt, cls, err := tryRemoteAuthAgent(s)
-	if err != nil || method != nil {
-		return method, agt, cls, err
+func remoteBestAuthMethod(e *Endpoint, s ssh.Session, in io.Reader) ([]gossh.AuthMethod, agent.Agent, closers, error) {
+	var methods []gossh.AuthMethod
+	var agt agent.Agent
+	var closers closers
+	for _, m := range e.Authentications() {
+		switch m {
+		case authModePassword:
+			method, err := passwordAuth(e, in, s)
+			if err != nil {
+				return nil, nil, closers, err
+			}
+			methods = append(methods, method)
+		case authModeKeyboardInteractive:
+			methods = append(methods, keyboardInteractiveAuth(in, s))
+		case authModePublicKey:
+			method, a, cl, err := tryRemoteAuthAgent(s)
+			if err != nil || method != nil {
+				agt = a
+				methods = append(methods, method)
+				closers = append(closers, cl...)
+			}
+			newKey, err := tryNewKey()
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			methods = append(methods, newKey)
+		}
 	}
 
-	method, err = tryNewKey()
-	return method, nil, nil, err
+	return methods, agt, closers, nil
 }
 
 // localBestAuthMethod figures out which authentication method is the best for
@@ -43,26 +66,40 @@ func remoteBestAuthMethod(s ssh.Session) (gossh.AuthMethod, agent.Agent, closers
 //
 // If any of the methods fails, it returns an error.
 // It'll return a nil list if none of the methods is available.
-func localBestAuthMethod(agt agent.Agent, e *Endpoint) ([]gossh.AuthMethod, error) {
+func localBestAuthMethod(agt agent.Agent, e *Endpoint, in io.Reader, out io.Writer) ([]gossh.AuthMethod, error) {
 	var methods []gossh.AuthMethod
-	if len(e.IdentityFiles) > 0 {
-		ids, err := tryIdendityFiles(e)
-		if err != nil {
-			return methods, err
+	for _, m := range e.Authentications() {
+		switch m {
+		case authModePassword:
+			method, err := passwordAuth(e, in, out)
+			if err != nil {
+				return nil, err
+			}
+			methods = append(methods, method)
+		case authModeKeyboardInteractive:
+			methods = append(methods, keyboardInteractiveAuth(in, out))
+		case authModePublicKey:
+			if len(e.IdentityFiles) > 0 {
+				ids, err := tryIdendityFiles(e)
+				if err != nil {
+					return methods, err
+				}
+				methods = append(methods, ids...)
+			}
+
+			if method := agentAuthMethod(agt); method != nil {
+				methods = append(methods, method)
+			}
+
+			keys, err := tryUserKeys()
+			if err != nil {
+				return nil, err
+			}
+			methods = append(methods, keys...)
 		}
-		methods = append(methods, ids...)
 	}
 
-	if method := agentAuthMethod(agt); method != nil {
-		methods = append(methods, method)
-	}
-
-	if len(methods) > 0 {
-		return methods, nil
-	}
-
-	keys, err := tryUserKeys()
-	return append(methods, keys...), err
+	return methods, nil
 }
 
 // agentAuthMethod setups an auth method for the given agent.
@@ -73,7 +110,11 @@ func agentAuthMethod(agt agent.Agent) gossh.AuthMethod {
 
 	signers, _ := agt.Signers()
 	for _, signer := range signers {
-		log.Printf("offering public key via ssh agent: %s %s", signer.PublicKey().Type(), gossh.FingerprintSHA256(signer.PublicKey()))
+		log.Info(
+			"offering public key via ssh agent",
+			"key.type", signer.PublicKey().Type(),
+			"key.fingerprint", gossh.FingerprintSHA256(signer.PublicKey()),
+		)
 	}
 	return gossh.PublicKeysCallback(agt.Signers)
 }
@@ -120,7 +161,7 @@ func tryRemoteAuthAgent(s ssh.Session) (gossh.AuthMethod, agent.Agent, closers, 
 	agent, closers, err := getRemoteAgent(s)
 	if err != nil {
 		if errors.Is(err, errNoRemoteAgent) {
-			wish.Error(s, fmt.Errorf("wishlist: ssh agent not available"))
+			wish.Errorln(s, fmt.Errorf("wishlist: ssh agent not available"))
 			return nil, nil, closers, nil
 		}
 		return nil, nil, closers, err
@@ -128,7 +169,11 @@ func tryRemoteAuthAgent(s ssh.Session) (gossh.AuthMethod, agent.Agent, closers, 
 
 	signers, _ := agent.Signers()
 	for _, signer := range signers {
-		log.Printf("offering public key via ssh agent: %s %s", signer.PublicKey().Type(), gossh.FingerprintSHA256(signer.PublicKey()))
+		log.Info(
+			"offering public key via ssh agent",
+			"key.type", signer.PublicKey().Type(),
+			"key.fingerprint", gossh.FingerprintSHA256(signer.PublicKey()),
+		)
 	}
 	return gossh.PublicKeysCallback(agent.Signers), agent, closers, nil
 }
@@ -136,28 +181,31 @@ func tryRemoteAuthAgent(s ssh.Session) (gossh.AuthMethod, agent.Agent, closers, 
 // tryNewKey will create a .wishlist/client_ed25519 keypair if one does not exist.
 // It will return an auth method that uses the keypair if it exist or is successfully created.
 func tryNewKey() (gossh.AuthMethod, error) {
-	path, err := filepath.Abs(".wishlist/client")
+	path, err := filepath.Abs(".wishlist/client_ed25519")
 	if err != nil {
 		return nil, fmt.Errorf("could not create client key: %w", err)
 	}
 
-	key, err := keygen.New(path, nil, keygen.Ed25519)
+	key, err := keygen.New(path, keygen.WithKeyType(keygen.Ed25519))
 	if err != nil {
-		return nil, err //nolint:wrapcheck
+		return nil, fmt.Errorf("could not create new client key at %q: %w", path, err)
 	}
 
-	signer, err := gossh.ParsePrivateKey(key.PrivateKeyPEM())
-	if err != nil {
-		return nil, err //nolint:wrapcheck
+	signer := key.Signer()
+	log.Info(
+		"offering public key",
+		"key.path", path,
+		"key.type", signer.PublicKey().Type(),
+		"key.fingerprint", gossh.FingerprintSHA256(signer.PublicKey()),
+	)
+
+	if !key.KeyPairExists() {
+		if err := key.WriteKeys(); err != nil {
+			return nil, fmt.Errorf("could not write key: %w", err)
+		}
 	}
 
-	log.Printf("offering public key: %s %s %s", path, signer.PublicKey().Type(), gossh.FingerprintSHA256(signer.PublicKey()))
-
-	if key.KeyPairExists() {
-		return gossh.PublicKeys(signer), nil
-	}
-
-	return gossh.PublicKeys(signer), key.WriteKeys()
+	return gossh.PublicKeys(signer), nil
 }
 
 func tryIdendityFiles(e *Endpoint) ([]gossh.AuthMethod, error) {
@@ -246,7 +294,12 @@ func parsePrivateKey(path string, password []byte) (gossh.AuthMethod, error) {
 		return nil, fmt.Errorf("failed to parse private key: %q: %w", path, err)
 	}
 
-	log.Printf("offering public key: %s %s %s", path, signer.PublicKey().Type(), gossh.FingerprintSHA256(signer.PublicKey()))
+	log.Info(
+		"offering public key",
+		"key.path", path,
+		"key.type", signer.PublicKey().Type(),
+		"key.fingerprint", gossh.FingerprintSHA256(signer.PublicKey()),
+	)
 	return gossh.PublicKeys(signer), nil
 }
 
@@ -256,7 +309,7 @@ func parsePrivateKey(path string, password []byte) (gossh.AuthMethod, error) {
 // if the host does not exist there, it adds it so its available next time, as plain old `ssh` does.
 func hostKeyCallback(e *Endpoint, path string) gossh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
-		kh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gomnd
+		kh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) //nolint:mnd
 		if err != nil {
 			return fmt.Errorf("failed to open known_hosts: %w", err)
 		}
@@ -271,14 +324,67 @@ func hostKeyCallback(e *Endpoint, path string) gossh.HostKeyCallback {
 			var kerr *knownhosts.KeyError
 			if errors.As(err, &kerr) {
 				if len(kerr.Want) > 0 {
-					return fmt.Errorf("possible man-in-the-middle attack: %w", err)
+					return fmt.Errorf("possible man-in-the-middle attack: %w - if your host's key changed, you might need to edit %q", err, kh.Name())
 				}
 				// if want is empty, it means the host was not in the known_hosts file, so lets add it there.
-				fmt.Fprintln(kh, knownhosts.Line([]string{e.Address}, key))
+				fmt.Fprintln(kh, knownhosts.Line([]string{e.Address}, key)) //nolint: errcheck
 				return nil
 			}
 			return fmt.Errorf("failed to check known_hosts: %w", err)
 		}
 		return nil
 	}
+}
+
+func askUser(in io.Reader, echo bool) (string, error) {
+	if !echo {
+		if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+			bts, err := term.ReadPassword(int(f.Fd()))
+			if err != nil {
+				return "", fmt.Errorf("could not scan: %w", err)
+			}
+			return string(bts), nil
+		}
+		log.Warn("stdin is not a terminal, can't disable echo")
+	}
+
+	var answer string
+	if _, err := fmt.Fscan(in, &answer); err != nil {
+		return "", fmt.Errorf("could not scan: %w", err)
+	}
+	return answer, nil
+}
+
+// keyboardInteractiveAuth implements keyboard interactive authentication.
+func keyboardInteractiveAuth(in io.Reader, out io.Writer) gossh.AuthMethod {
+	scan := func(q string, echo bool) (string, error) {
+		fmt.Fprint(out, q+" ") //nolint: errcheck
+		answer, err := askUser(in, echo)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintln(out) //nolint: errcheck
+		return answer, nil
+	}
+	return gossh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) (answers []string, err error) {
+		fmt.Fprintln(out, name)        //nolint: errcheck
+		fmt.Fprintln(out, instruction) //nolint: errcheck
+		for i, q := range questions {
+			answer, err := scan(q, echos[i])
+			if err != nil {
+				return nil, err
+			}
+			answers = append(answers, answer)
+		}
+		return answers, nil
+	})
+}
+
+func passwordAuth(e *Endpoint, in io.Reader, out io.Writer) (gossh.AuthMethod, error) {
+	fmt.Fprintf(out, "%s password: ", e.Address) //nolint: errcheck
+	secret, err := askUser(in, false)
+	if err != nil {
+		return nil, fmt.Errorf("could not read password: %w", err)
+	}
+	return gossh.Password(secret), nil
 }

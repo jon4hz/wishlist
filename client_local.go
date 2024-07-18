@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/signal"
 	"os/user"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/log"
 	"github.com/muesli/cancelreader"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
@@ -70,7 +70,7 @@ func (s *localSession) Run() error {
 	}
 	defer cls.close()
 
-	methods, err := localBestAuthMethod(agt, s.endpoint)
+	methods, err := localBestAuthMethod(agt, s.endpoint, os.Stdin, os.Stdout)
 	if err != nil {
 		return fmt.Errorf("failed to setup a authentication method: %w", err)
 	}
@@ -116,17 +116,12 @@ func (s *localSession) Run() error {
 			return fmt.Errorf("requested a TTY, but current session is not TTY, aborting")
 		}
 
-		log.Println("requesting tty")
-		originalState, err := term.MakeRaw(fd)
+		log.Info("requesting tty")
+		restore, err := makeRaw(fd)
 		if err != nil {
-			return fmt.Errorf("failed get terminal state: %w", err)
+			return err
 		}
-
-		defer func() {
-			if err := term.Restore(fd, originalState); err != nil {
-				log.Println("couldn't restore terminal state:", err)
-			}
-		}()
+		defer restore()
 
 		w, h, err := term.GetSize(fd)
 		if err != nil {
@@ -141,7 +136,7 @@ func (s *localSession) Run() error {
 		defer cancel()
 		go s.notifyWindowChanges(ctx, session)
 	} else {
-		log.Println("did not request a tty")
+		log.Info("did not request a tty")
 	}
 
 	if s.endpoint.RemoteCommand == "" {

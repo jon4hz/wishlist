@@ -1,8 +1,12 @@
 package sshconfig
 
 import (
+	_ "embed"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -13,7 +17,7 @@ import (
 
 func TestParseFile(t *testing.T) {
 	t.Run("good", func(t *testing.T) {
-		endpoints, err := ParseFile("testdata/good")
+		endpoints, err := ParseFile("testdata/good", nil)
 		require.NoError(t, err)
 
 		require.Len(t, endpoints, 11)
@@ -28,6 +32,13 @@ func TestParseFile(t *testing.T) {
 				Address: "supernova.local:22",
 				User:    "notme",
 				Timeout: 20 * time.Second,
+				PreferredAuthentications: []string{
+					"password",
+					"keyboard-interactive",
+					"publickey",
+					"hostbased",
+				},
+				ProxyJump: "user@host:port",
 				SendEnv: []string{
 					"FOO",
 				},
@@ -68,6 +79,7 @@ func TestParseFile(t *testing.T) {
 				},
 				SetEnv: []string{
 					"FOOS=foobar",
+					"FOO2=foobar within quotes",
 				},
 			},
 			"multiple3": {
@@ -111,28 +123,90 @@ func TestParseFile(t *testing.T) {
 	})
 
 	t.Run("invalid node", func(t *testing.T) {
-		endpoints, err := ParseFile("testdata/invalid_node")
+		endpoints, err := ParseFile("testdata/invalid_node", nil)
 		require.Empty(t, endpoints)
 		require.EqualError(t, err, `invalid node on app "invalid": "HostNameinvalid-because-no-spaces"`)
 	})
 
 	t.Run("invalid path", func(t *testing.T) {
-		endpoints, err := ParseFile("testdata/nope")
+		endpoints, err := ParseFile("testdata/nope", nil)
 		require.Empty(t, endpoints)
 		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("with seed", func(t *testing.T) {
+		endpoints, err := ParseReader(newNamedReader(`
+Host *.local
+  User carlos
+
+Host zap.local
+  ForwardAgent yes
+		`, t.TempDir()), []*wishlist.Endpoint{
+			{
+				Name:    "foo.local",
+				Address: "foo.local:22",
+			},
+			{
+				Name:    "zap.local",
+				Address: "zap.local:22",
+			},
+			{
+				Name:    "zap.non_local",
+				Address: "zap.non_local:22",
+			},
+		})
+		require.NoError(t, err)
+		require.ElementsMatch(t, []*wishlist.Endpoint{
+			{
+				Name:    "foo.local",
+				Address: "foo.local:22",
+				User:    "carlos",
+			},
+			{
+				Name:         "zap.local",
+				Address:      "zap.local:22",
+				User:         "carlos",
+				ForwardAgent: true,
+			},
+			{
+				Name:    "zap.non_local",
+				Address: "zap.non_local:22",
+			},
+		}, endpoints)
 	})
 }
 
 func TestParseReader(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
-		endpoints, err := ParseReader(iotest.ErrReader(fmt.Errorf("any")))
+		endpoints, err := ParseReader(
+			&fakeNamedReader{
+				reader: iotest.ErrReader(fmt.Errorf("any")),
+				name:   "",
+			},
+			nil,
+		)
 		require.EqualError(t, err, "failed to read config: any")
 		require.Empty(t, endpoints)
 	})
 }
 
+//go:embed testdata/include
+var includeFile []byte
+
+//go:embed testdata/1.included
+var includedFile1 []byte
+
+//go:embed testdata/2.included
+var includedFile2 []byte
+
 func TestParseIncludes(t *testing.T) {
-	endpoints, err := ParseFile("testdata/include")
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config")
+	require.NoError(t, os.WriteFile(path, includeFile, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "1.included"), includedFile1, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "2.included"), includedFile2, 0644))
+
+	endpoints, err := ParseFile(path, nil)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []*wishlist.Endpoint{
 		{
@@ -142,9 +216,34 @@ func TestParseIncludes(t *testing.T) {
 			IdentityFiles: []string{"~/.ssh/id_rsa2", "~/.ssh/other_id"},
 		},
 		{
-			Name:    "something.else",
-			Address: "something.else:2323",
-			User:    "ciclano",
+			Name:                     "something.else",
+			Address:                  "something.else:2323",
+			User:                     "ciclano",
+			PreferredAuthentications: []string{"password"},
+		},
+	}, endpoints)
+}
+
+func TestParseIncludesAbsPath(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config")
+	includedPath := filepath.Join(tmp, "1.included")
+	require.NoError(t, os.WriteFile(path, []byte(fmt.Sprintf(`
+		Include %s
+
+		Host test.foo.bar
+			User me
+	`, includedPath)), 0644))
+	require.NoError(t, os.WriteFile(includedPath, includedFile1, 0644))
+
+	endpoints, err := ParseFile(path, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []*wishlist.Endpoint{
+		{
+			Name:          "test.foo.bar",
+			Address:       "test.foo.bar:22",
+			User:          "me",
+			IdentityFiles: []string{"~/.ssh/id_rsa2"},
 		},
 	}, endpoints)
 }
@@ -208,7 +307,7 @@ func TestSplit(t *testing.T) {
 		"*":         {Hostname: "foobar"},
 		"foo.bar":   {User: "john"},
 	},
-	))
+	), nil)
 
 	require.Equal(t, 2, wildcards.length())
 	require.Equal(t, map[string]hostinfo{
@@ -254,7 +353,7 @@ func TestHostinfoMap(t *testing.T) {
 	require.Equal(t, []string{"a", "b"}, order)
 
 	expectedErr := fmt.Errorf("some error")
-	require.Equal(t, expectedErr, m.forEach(func(s string, h hostinfo, e error) error {
+	require.Equal(t, expectedErr, m.forEach(func(s string, _ hostinfo, e error) error {
 		if e != nil {
 			return e
 		}
@@ -271,4 +370,26 @@ func newHostinfoMapFrom(input map[string]hostinfo) *hostinfoMap {
 		m.set(k, v)
 	}
 	return m
+}
+
+type fakeNamedReader struct {
+	reader io.Reader
+	name   string
+}
+
+// Name implements NamedReader.
+func (r *fakeNamedReader) Name() string {
+	return r.name
+}
+
+// Read implements NamedReader.
+func (r *fakeNamedReader) Read(p []byte) (n int, err error) {
+	return r.reader.Read(p)
+}
+
+func newNamedReader(s, name string) NamedReader {
+	return &fakeNamedReader{
+		reader: strings.NewReader(s),
+		name:   name,
+	}
 }

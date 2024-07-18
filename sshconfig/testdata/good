@@ -4,12 +4,14 @@ Host darkstar
 	HostName darkstar.local
 
 Host supernova
-	HostName supernova.local
-	User notme
+	Hostname supernova.local
+	uSer notme
 	ForwardAgent does-not-matter
 	SendEnv FOO
 	SetEnv BAR=bar
 	ConnectTimeout 20
+	PreferredAuthentications password,keyboard-interactive,publickey,hostbased
+	ProxyJump user@host:port
 
 Host app1
 	HostName app.foo.local
@@ -36,6 +38,7 @@ Host multiple2
 	Port 2223
 	ForwardAgent no
 	SetEnv FOOS=foobar
+	SetEnv FOO2="foobar within quotes"
 
 ##############
 # HOME STUFF #

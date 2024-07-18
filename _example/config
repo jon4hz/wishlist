@@ -5,7 +5,7 @@
 # Includes another config file.
 # Include ~/.ssh/config.other
 
-# Hosts will wildcards will not show up in the list
+# Hosts with wildcards will not show up in the list
 Host *.bar
 	# Forwards the agent to the target host.
 	ForwardAgent true
@@ -40,6 +40,9 @@ Host foo
 
 	# Private key to use.
 	IdentityFile ~/.ssh/foo_ed25519
+
+	# Proxy jump.
+	ProxyJump user@host:22
 
 # Having only the Host key also works, it'll be both the endpoint's name and
 #  hostname, using 22 as default port

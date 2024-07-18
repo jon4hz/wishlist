@@ -2,13 +2,19 @@ package wishlist
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
 	"github.com/gobwas/glob"
+)
+
+const (
+	authModePassword            = "password"
+	authModePublicKey           = "publickey"
+	authModeKeyboardInteractive = "keyboard-interactive"
 )
 
 // Link defines an item link.
@@ -32,19 +38,49 @@ func (l Link) String() string {
 // Endpoint represents an endpoint to list.
 // If it has a Handler, wishlist will start an SSH server on the given address.
 type Endpoint struct {
-	Name          string            `yaml:"name"`            // Endpoint name.
-	Address       string            `yaml:"address"`         // Endpoint address in the `host:port` format, if empty, will be the same address as the list, increasing the port number.
-	User          string            `yaml:"user"`            // User to authenticate as.
-	ForwardAgent  bool              `yaml:"forward_agent"`   // ForwardAgent defines whether to forward the current agent. Anologous to SSH's config ForwardAgent.
-	RequestTTY    bool              `yaml:"request_tty"`     // RequestTTY defines whether to request a TTY. Anologous to SSH's config RequestTTY.
-	RemoteCommand string            `yaml:"remote_command"`  // RemoteCommand defines whether to request a TTY. Anologous to SSH's config RemoteCommand.
-	Desc          string            `yaml:"description"`     // Description describes an optional description of the item.
-	Link          Link              `yaml:"link"`            // Links can be used to add a link to the item description using OSC8.
-	SendEnv       []string          `yaml:"send_env"`        // Anologous to SSH's SendEnv
-	SetEnv        []string          `yaml:"set_env"`         // Anologous to SSH's SetEnv
-	IdentityFiles []string          `yaml:"identity_files"`  // IdentityFiles is only used when in local mode.
-	Timeout       time.Duration     `yaml:"connect_timeout"` // Connection timeout.
-	Middlewares   []wish.Middleware `yaml:"-"`               // wish middlewares you can use in the factory method.
+	Name                     string            `yaml:"name"`                      // Endpoint name.
+	Address                  string            `yaml:"address"`                   // Endpoint address in the `host:port` format, if empty, will be the same address as the list, increasing the port number.
+	User                     string            `yaml:"user"`                      // User to authenticate as.
+	ForwardAgent             bool              `yaml:"forward_agent"`             // ForwardAgent defines whether to forward the current agent. Anologous to SSH's config ForwardAgent.
+	RequestTTY               bool              `yaml:"request_tty"`               // RequestTTY defines whether to request a TTY. Anologous to SSH's config RequestTTY.
+	RemoteCommand            string            `yaml:"remote_command"`            // RemoteCommand defines whether to request a TTY. Anologous to SSH's config RemoteCommand.
+	Desc                     string            `yaml:"description"`               // Description describes an optional description of the item.
+	Link                     Link              `yaml:"link"`                      // Links can be used to add a link to the item description using OSC8.
+	ProxyJump                string            `yaml:"proxy_jump"`                // Analogous to SSH's ProxyJump
+	SendEnv                  []string          `yaml:"send_env"`                  // Analogous to SSH's SendEnv
+	SetEnv                   []string          `yaml:"set_env"`                   // Analogous to SSH's SetEnv
+	PreferredAuthentications []string          `yaml:"preferred_authentications"` // Analogous to SSH's PreferredAuthentications
+	IdentityFiles            []string          `yaml:"identity_files"`            // IdentityFiles is only used when in local mode.
+	Timeout                  time.Duration     `yaml:"connect_timeout"`           // Connection timeout.
+	Middlewares              []wish.Middleware `yaml:"-"`                         // wish middlewares you can use in the factory method.
+}
+
+// EndpointHint can be used to match a discovered endpoint (through zeroconf
+// for example) and set additional options into it.
+type EndpointHint struct {
+	Match                    string        `yaml:"match"`
+	Port                     string        `yaml:"port"`
+	User                     string        `yaml:"user"`
+	ForwardAgent             *bool         `yaml:"forward_agent"`
+	RequestTTY               *bool         `yaml:"request_tty"`
+	RemoteCommand            string        `yaml:"remote_command"`
+	Desc                     string        `yaml:"description"`
+	Link                     Link          `yaml:"link"`
+	ProxyJump                string        `yaml:"proxy_jump"`
+	SendEnv                  []string      `yaml:"send_env"`
+	SetEnv                   []string      `yaml:"set_env"`
+	PreferredAuthentications []string      `yaml:"preferred_authentications"`
+	IdentityFiles            []string      `yaml:"identity_files"`
+	Timeout                  time.Duration `yaml:"connect_timeout"`
+}
+
+// Authentications returns either the client preferred authentications or the
+// default publickey,keyboard-interactive.
+func (e Endpoint) Authentications() []string {
+	if len(e.PreferredAuthentications) == 0 {
+		return []string{authModePublicKey, authModeKeyboardInteractive}
+	}
+	return e.PreferredAuthentications
 }
 
 // Environment evaluates SendEnv and SetEnv into the env map that should be
@@ -64,7 +100,7 @@ func (e Endpoint) Environment(hostenv ...string) map[string]string {
 		if e.shouldSend(k) {
 			env[k] = v
 		} else {
-			log.Printf("ignored env %s", k)
+			log.Debug("ignored", "env", k)
 		}
 	}
 
@@ -112,6 +148,7 @@ type Config struct {
 	Listen       string                              `yaml:"listen"`    // Address to listen on.
 	Port         int64                               `yaml:"port"`      // Port to start the first server on.
 	Endpoints    []*Endpoint                         `yaml:"endpoints"` // Endpoints to list.
+	Hints        []EndpointHint                      `yaml:"hints"`     // Endpoints hints to apply to discovered hosts.
 	Factory      func(Endpoint) (*ssh.Server, error) `yaml:"-"`         // Factory used to create the SSH server for the given endpoint.
 	Users        []User                              `yaml:"users"`     // Users allowed to access the list.
 	Metrics      Metrics                             `yaml:"metrics"`   // Metrics configuration.

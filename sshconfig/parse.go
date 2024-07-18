@@ -3,39 +3,48 @@ package sshconfig
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/wishlist"
 	"github.com/charmbracelet/wishlist/home"
 	"github.com/gobwas/glob"
 	"github.com/kevinburke/ssh_config"
 )
 
+// NamedReader is an io.Reader that also has a name, usually a os.File.
+type NamedReader interface {
+	io.Reader
+	Name() string
+}
+
 // PraseFile reads and parses the file in the given path.
-func ParseFile(path string) ([]*wishlist.Endpoint, error) {
+func ParseFile(path string, seed []*wishlist.Endpoint) ([]*wishlist.Endpoint, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open config: %w", err)
 	}
 	defer f.Close() //nolint:errcheck
-	return ParseReader(f)
+	return ParseReader(f, seed)
 }
 
 // ParseReader reads and parses the given reader.
-func ParseReader(r io.Reader) ([]*wishlist.Endpoint, error) {
+func ParseReader(r NamedReader, seed []*wishlist.Endpoint) ([]*wishlist.Endpoint, error) {
 	infos, err := parseInternal(r)
 	if err != nil {
 		return nil, err
 	}
 
-	wildcards, hosts := split(infos)
+	wildcards, hosts := split(infos, seed)
 
 	endpoints := make([]*wishlist.Endpoint, 0, infos.length())
 	if err := hosts.forEach(func(name string, info hostinfo, err error) error {
@@ -64,14 +73,16 @@ func ParseReader(r io.Reader) ([]*wishlist.Endpoint, error) {
 				wishlist.FirstNonEmpty(info.Hostname, name),
 				wishlist.FirstNonEmpty(info.Port, "22"),
 			),
-			User:          info.User,
-			IdentityFiles: info.IdentityFiles,
-			ForwardAgent:  stringToBool(info.ForwardAgent),
-			RequestTTY:    stringToBool(info.RequestTTY),
-			RemoteCommand: info.RemoteCommand,
-			Timeout:       info.Timeout,
-			SetEnv:        info.SetEnv,
-			SendEnv:       info.SendEnv,
+			User:                     info.User,
+			IdentityFiles:            info.IdentityFiles,
+			ForwardAgent:             stringToBool(info.ForwardAgent),
+			RequestTTY:               stringToBool(info.RequestTTY),
+			RemoteCommand:            info.RemoteCommand,
+			Timeout:                  info.Timeout,
+			SetEnv:                   info.SetEnv,
+			SendEnv:                  info.SendEnv,
+			PreferredAuthentications: info.PreferredAuthentications,
+			ProxyJump:                info.ProxyJump,
 		})
 		return nil
 	}); err != nil {
@@ -87,16 +98,18 @@ func stringToBool(s string) bool {
 }
 
 type hostinfo struct {
-	User          string
-	Hostname      string
-	Port          string
-	IdentityFiles []string
-	ForwardAgent  string
-	RequestTTY    string
-	RemoteCommand string
-	SendEnv       []string
-	SetEnv        []string
-	Timeout       time.Duration
+	User                     string
+	Hostname                 string
+	Port                     string
+	IdentityFiles            []string
+	ForwardAgent             string
+	RequestTTY               string
+	RemoteCommand            string
+	ProxyJump                string
+	SendEnv                  []string
+	SetEnv                   []string
+	PreferredAuthentications []string
+	Timeout                  time.Duration
 }
 
 type hostinfoMap struct {
@@ -143,7 +156,7 @@ func newHostinfoMap() *hostinfoMap {
 	}
 }
 
-func parseInternal(r io.Reader) (*hostinfoMap, error) {
+func parseInternal(r NamedReader) (*hostinfoMap, error) {
 	bts, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
@@ -182,51 +195,71 @@ func parseInternal(r io.Reader) (*hostinfoMap, error) {
 					continue
 				}
 
-				parts := strings.SplitN(node, " ", 2) //nolint:gomnd
-				if len(parts) != 2 {                  //nolint:gomnd
+				parts := strings.SplitN(node, " ", 2) //nolint:mnd
+				if len(parts) != 2 {                  //nolint:mnd
 					return nil, fmt.Errorf("invalid node on app %q: %q", name, node)
 				}
 
 				key := strings.TrimSpace(parts[0])
 				value := strings.TrimSpace(parts[1])
 
-				switch key {
-				case "HostName":
+				switch strings.ToLower(key) {
+				case "hostname":
 					info.Hostname = value
-				case "User":
+				case "user":
 					info.User = value
-				case "Port":
+				case "port":
 					info.Port = value
-				case "IdentityFile":
+				case "identityfile":
 					info.IdentityFiles = append(info.IdentityFiles, value)
-				case "ForwardAgent":
+				case "forwardagent":
 					info.ForwardAgent = value
-				case "RequestTTY":
+				case "requesttty":
 					info.RequestTTY = value
-				case "RemoteCommand":
+				case "remotecommand":
 					info.RemoteCommand = value
-				case "ConnectTimeout":
+				case "proxyjump":
+					info.ProxyJump = value
+				case "connecttimeout":
 					timeout, err := strconv.Atoi(value)
 					if err != nil {
 						return nil, fmt.Errorf("invalid ConnectTimeout: %s: %w", value, err)
 					}
 					info.Timeout = time.Second * time.Duration(timeout)
-				case "SendEnv":
+				case "sendenv":
 					info.SendEnv = append(info.SendEnv, value)
-				case "SetEnv":
-					info.SetEnv = append(info.SetEnv, value)
-				case "Include":
+				case "setenv":
+					info.SetEnv = append(info.SetEnv, parseSetEnv(value))
+				case "preferredauthentications":
+					info.PreferredAuthentications = append(info.PreferredAuthentications, strings.Split(value, ",")...)
+				case "include":
 					path, err := home.ExpandPath(value)
 					if err != nil {
 						return nil, err //nolint: wrapcheck
 					}
-					included, err := parseFileInternal(path)
-					if err != nil {
-						return nil, err
+					if !filepath.IsAbs(path) {
+						// ssh use paths relative to the current file path
+						path = filepath.Join(filepath.Dir(r.Name()), path)
 					}
-					infos.set(name, info)
-					infos = merge(infos, included)
-					info, _ = infos.get(name)
+
+					matches, err := filepath.Glob(path)
+					if err != nil {
+						return nil, err //nolint: wrapcheck
+					}
+
+					for _, match := range matches {
+						log.Info("Using configuration file (via includes)", "path", match)
+						included, err := parseFileInternal(match)
+						if err != nil {
+							if errors.Is(err, os.ErrNotExist) {
+								continue
+							}
+							return nil, err
+						}
+						infos.set(name, info)
+						infos = merge(infos, included)
+						info, _ = infos.get(name)
+					}
 				}
 			}
 
@@ -237,16 +270,24 @@ func parseInternal(r io.Reader) (*hostinfoMap, error) {
 	return infos, nil
 }
 
-func split(m *hostinfoMap) (*hostinfoMap, *hostinfoMap) {
+func split(m *hostinfoMap, seed []*wishlist.Endpoint) (*hostinfoMap, *hostinfoMap) {
 	wildcards := newHostinfoMap()
 	hosts := newHostinfoMap()
+	for _, e := range seed {
+		hostname, port, _ := net.SplitHostPort(e.Address)
+		hosts.set(e.Name, hostinfo{
+			Hostname: hostname,
+			Port:     port,
+		})
+	}
 	_ = m.forEach(func(k string, v hostinfo, _ error) error {
 		// FWIW the lib always returns at least one * section... no idea why.
 		if strings.Contains(k, "*") {
 			wildcards.set(k, v)
 			return nil
 		}
-		hosts.set(k, v)
+		vv, _ := hosts.get(k)
+		hosts.set(k, mergeHostinfo(v, vv))
 		return nil
 	})
 	return wildcards, hosts
@@ -297,8 +338,12 @@ func mergeHostinfo(h1, h2 hostinfo) hostinfo {
 	if h1.Timeout > 0 {
 		h2.Timeout = h1.Timeout
 	}
+	if h1.ProxyJump != "" {
+		h2.ProxyJump = h1.ProxyJump
+	}
 	h2.SendEnv = append(h2.SendEnv, h1.SendEnv...)
 	h2.SetEnv = append(h2.SetEnv, h1.SetEnv...)
+	h2.PreferredAuthentications = append(h2.PreferredAuthentications, h1.PreferredAuthentications...)
 	return h2
 }
 
@@ -309,4 +354,17 @@ func parseFileInternal(path string) (*hostinfoMap, error) {
 	}
 	defer f.Close() //nolint:errcheck
 	return parseInternal(f)
+}
+
+func parseSetEnv(e string) string {
+	k, v, ok := strings.Cut(e, "=")
+	if !ok {
+		// just in case, do whatever we were doing before.
+		return e
+	}
+	qv, err := strconv.Unquote(v)
+	if err == nil {
+		return fmt.Sprintf("%s=%s", k, qv)
+	}
+	return fmt.Sprintf("%s=%s", k, v)
 }

@@ -2,31 +2,36 @@ package wishlist
 
 import (
 	"errors"
-	"log"
+	"fmt"
+	"net"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
+	"github.com/muesli/termenv"
 )
 
-var docStyle = lipgloss.NewStyle().Margin(1, 2) //nolint:gomnd
-
 var (
+	copyIPAddr = key.NewBinding(
+		key.WithKeys("y"),
+		key.WithHelp("y", "copy address"),
+	)
 	enter = key.NewBinding(
 		key.WithKeys("enter", "o"),
 		key.WithHelp("enter/o", "connect"),
 	)
-	keyO = key.NewBinding(
-		key.WithKeys("o"),
-	)
 )
 
 // NewListing creates a new listing model for the given endpoints and SSH session.
-// If sessuion is nil, it is assume to be a local listing.
-func NewListing(endpoints []*Endpoint, client SSHClient) *ListModel {
-	l := list.NewModel(nil, list.NewDefaultDelegate(), 0, 0)
+// If session is nil, it is assume to be a local listing.
+func NewListing(endpoints []*Endpoint, client SSHClient, r *lipgloss.Renderer) *ListModel {
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Directory Listing"
+	l.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{copyIPAddr}
+	}
 	l.AdditionalShortHelpKeys = func() []key.Binding {
 		return []key.Binding{enter}
 	}
@@ -35,6 +40,7 @@ func NewListing(endpoints []*Endpoint, client SSHClient) *ListModel {
 		list:      l,
 		endpoints: endpoints,
 		client:    client,
+		styles:    makeStyles(r),
 	}
 	m.SetItems(endpoints)
 	return m
@@ -46,7 +52,9 @@ type ListModel struct {
 	endpoints []*Endpoint
 	client    SSHClient
 	quitting  bool
+	width     int
 	err       error
+	styles    styles
 }
 
 // SetItems allows to update the listing items.
@@ -56,8 +64,8 @@ func (m *ListModel) SetItems(endpoints []*Endpoint) tea.Cmd {
 	d := list.NewDefaultDelegate()
 	d.SetHeight(h)
 	m.list.SetDelegate(d)
-	log.Println("setting delegate height:", h)
-	return m.list.SetItems(endpointsToListItems(endpoints, descriptors))
+	log.Debug("setting delegate height", "height", h)
+	return m.list.SetItems(endpointsToListItems(endpoints, descriptors, m.styles))
 }
 
 func features(endpoints []*Endpoint) []descriptor {
@@ -88,7 +96,7 @@ func features(endpoints []*Endpoint) []descriptor {
 	return append(descriptors, withSSHURL)
 }
 
-func endpointsToListItems(endpoints []*Endpoint, descriptors []descriptor) []list.Item {
+func endpointsToListItems(endpoints []*Endpoint, descriptors []descriptor, styles styles) []list.Item {
 	var items []list.Item //nolint: prealloc
 	for _, endpoint := range endpoints {
 		if !endpoint.Valid() {
@@ -97,6 +105,7 @@ func endpointsToListItems(endpoints []*Endpoint, descriptors []descriptor) []lis
 		items = append(items, ItemWrapper{
 			endpoint:    endpoint,
 			descriptors: descriptors,
+			styles:      styles,
 		})
 	}
 	return items
@@ -127,17 +136,21 @@ func (m *ListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, list.DefaultKeyMap().Quit) && !m.list.SettingFilter() && m.list.FilterState() != list.FilterApplied {
 			m.quitting = true
 		}
+		if key.Matches(msg, copyIPAddr) && !m.list.SettingFilter() {
+			if w := m.selected(); w != nil {
+				host, _, _ := net.SplitHostPort(w.endpoint.Address)
+				termenv.Copy(host)
+				return m, m.list.NewStatusMessage(fmt.Sprintf("copied %q to the clipboard", host))
+			}
+
+			return m, nil
+		}
 		if key.Matches(msg, enter) {
-			if key.Matches(msg, keyO) && m.list.SettingFilter() {
+			if m.list.SettingFilter() {
 				break
 			}
-			selectedItem := m.list.SelectedItem()
-			if selectedItem == nil {
-				return m, nil
-			}
-			w, ok := selectedItem.(ItemWrapper)
-			if !ok {
-				// this should never happen
+			w := m.selected()
+			if w == nil {
 				return m, nil
 			}
 			cmd := m.client.For(w.endpoint)
@@ -147,7 +160,8 @@ func (m *ListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		top, right, bottom, left := docStyle.GetMargin()
+		top, right, bottom, left := m.styles.Doc.GetMargin()
+		m.width = msg.Width
 		m.list.SetSize(msg.Width-left-right, msg.Height-top-bottom)
 
 	case SetEndpointsMsg:
@@ -157,7 +171,7 @@ func (m *ListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		if msg.err != nil {
-			log.Println("got an error:", msg.err)
+			log.Warn("got an error", "err", msg.err)
 			m.err = msg.err
 			return m, nil
 		}
@@ -168,18 +182,18 @@ func (m *ListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-var (
-	logoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#FFFDF5", Dark: "#FFFDF5"}).
-			Background(lipgloss.Color("#5A56E0")).
-			Padding(0, 1).
-			SetString("Wishlist")
-	errStyle = lipgloss.NewStyle().
-			Italic(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "#FF4672", Dark: "#ED567A"})
-	footerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"})
-)
+func (m *ListModel) selected() *ItemWrapper {
+	selectedItem := m.list.SelectedItem()
+	if selectedItem == nil {
+		return nil
+	}
+	w, ok := selectedItem.(ItemWrapper)
+	if !ok {
+		// this should never happen
+		return nil
+	}
+	return &w
+}
 
 // View comply with tea.Model interface.
 func (m *ListModel) View() string {
@@ -188,16 +202,25 @@ func (m *ListModel) View() string {
 	}
 
 	if m.err != nil {
-		return logoStyle.String() + "\n\n" +
-			"Something went wrong:" + "\n\n" +
-			errStyle.Render(rootCause(m.err).Error()) + "\n\n" +
-			footerStyle.Render("Press any key to go back to the list.") + "\n"
+		header := lipgloss.NewStyle().
+			Width(m.width).
+			Render("Something went wrong:")
+		errstr := m.styles.Err.
+			Width(m.width).
+			Render(rootCause(m.err).Error())
+		footer := m.styles.Footer.
+			Width(m.width).
+			Render("Press any key to go back to the list.")
+		return m.styles.Logo.String() + "\n\n" +
+			header + "\n\n" +
+			errstr + "\n\n" +
+			footer + "\n"
 	}
-	return docStyle.Render(m.list.View())
+	return m.styles.Doc.Render(m.list.View())
 }
 
 func rootCause(err error) error {
-	log.Println("error:", err)
+	log.Warn("root cause", "err", err)
 	for {
 		e := errors.Unwrap(err)
 		if e == nil {

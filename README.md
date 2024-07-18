@@ -1,5 +1,4 @@
-Wishlist
-========
+# Wishlist
 
 <p>
     <a href="https://github.com/charmbracelet/wishlist/releases"><img src="https://img.shields.io/github/release/charmbracelet/wishlist.svg" alt="Latest Release"></a>
@@ -10,14 +9,17 @@ Wishlist
 
 The SSH directory ✨
 
-![screencast](https://user-images.githubusercontent.com/42545625/176265745-1749c5ae-bf8d-460f-865c-fae0e45cb448.gif)
+![Gif](https://vhs.charm.sh/vhs-3YDAKLasKh7IgWNTkHKrHB.gif)
 
-With Wishlist you can have a single entrypoint for multiple SSH endpoints, whether they are [Wish](https://github.com/charmbracelet/wish) apps or not.
+With Wishlist you can have a single entry point for multiple SSH endpoints,
+whether they are [Wish](https://github.com/charmbracelet/wish) apps or not.
 
-As a server, it can be used to start multiple SSH apps within a single package and list them over SSH.
+As a server, it can be used to start multiple SSH apps within a single package
+and list them over SSH.
 You can list apps provided elsewhere, too.
 
-You can also use the `wishlist` CLI to list and connect to servers in your `~/.ssh/config` or a YAML config file.
+You can also use the `wishlist` command to list and connect to servers in your
+`~/.ssh/config` or in a YAML configuration file.
 
 ## Installation
 
@@ -28,9 +30,15 @@ Use your fave package manager:
 brew install charmbracelet/tap/wishlist
 
 # Arch Linux (btw)
-yay -S wishlist-bin (or wishlist)
+yay -S wishlist-bin
+# or
+yay -S wishlist
+
+# Windows (with winget)
+winget install wishlist
 
 # Windows (with Scoop)
+scoop bucket add charm https://github.com/charmbracelet/scoop-bucket.git
 scoop install wishlist
 
 # Nix
@@ -54,7 +62,7 @@ sudo yum install wishlist
 
 Or download a pre-compiled binary or package from the [releases][releases] page.
 
-Or just build it yourself (requires Go 1.18+):
+Or just build it yourself (requires Go 1.19+):
 
 ```bash
 git clone https://github.com/charmbracelet/wishlist.git
@@ -64,50 +72,58 @@ go build ./cmd/wishlist/
 
 [releases]: https://github.com/charmbracelet/wishlist/releases
 
-
 ## Usage
 
 ### CLI
 
 #### Remote
 
-If you just want a directory of existing servers, you can use the `wishlist` CLI and a YAML config file. You can also just run it without any arguments to list the servers in your `~/.ssh/config`.
-To start wishlist in server mode, you'll need to use the `serve` subcommand:
+If you just want a directory of existing servers, you can use the `wishlist` CLI
+and a YAML config file. You can also just run it without any arguments to list
+the servers in your `~/.ssh/config`. To start wishlist in server mode, you'll
+need to use the `serve` subcommand:
 
 ```sh
 wishlist serve
 ```
 
-Check the [example config file](/_example/config.yaml) file as well as `wishlist server --help` for details.
+Check the [example config file](/_example/config.yaml) file as well as
+`wishlist server --help` for details.
 
 #### Local
 
-If you want to explore your `~/.ssh/config`, you can run wishlist in local mode with:
+If you want to explore your `~/.ssh/config`, you can run wishlist in local mode
+with:
 
 ```sh
 wishlist
 ```
 
-Note that not all options are supported at this moment. Check the [commented example config](/_example/config) for reference.
+Note that not all options are supported at this moment. Check the
+[commented example config](/_example/config) for reference.
 
 ### Library
 
-Wishlist is also available as a library, which allows you to start several apps within the same process.
+Wishlist is also available as a library, which allows you to start several apps
+within the same process.
 Check out the `_example` folder for a working example.
 
 ## Auth
 
 ### Local mode
 
-When running in local mode, wishlist will first see if the current endpoint has an `IdentityFile` specified.
+When running in local mode, wishlist will first see if the current endpoint has
+an `IdentityFile` specified.
 If so, it'll try to use that.
 If not, it'll see if there's a SSH Agent available, and use it.
 Otherwise, it'll try the common key names in `~/.ssh`.
 
 ### Server mode
 
-When running as a server, wishlist will first try to forward the current SSH Agent.
-If there's no agent, it'll create or use an existing ed25519 key present in `.wishlist/client_ed25519`.
+When running as a server, wishlist will first try to forward the current SSH
+Agent.
+If there's no agent, it'll create or use an existing ed25519 key present in
+`.wishlist/client_ed25519`.
 Password authentication is not supported at this moment.
 
 ### Agent forwarding example
@@ -135,9 +151,91 @@ Host wishlist
 	UserKnownHostsFile /dev/null
 ```
 
+## Discovery
+
+Wishlist can discover endpoints using Zeroconf, SRV Records, and [Tailscale][].
+
+You can find a brief explanation and examples of all of them bellow.
+
+Run `wishlist --help` to see all the options.
+
+[Tailscale]: http://tailscale.com
+
+### Tailscale
+
+You can configure Wishlist to find all nodes in your **tailnet** and add them
+as endpoints:
+
+```bash
+wishlist --tailscale.net=your_tailnet_name --tailscale.key=tskey-api-abc123...
+```
+
+You can use the [Hints](#hints) to change the connection settings.
+
+#### OAuth authentication
+
+Tailscale API keys expire after 90 days. If you want something that doesn't
+require you to intervene every couple of months, use OAuth Clients:
+
+Create a client [here](https://login.tailscale.com/admin/settings/oauth).
+The only scope needed is `devices:read`.
+
+Instead of using `--tailscale.key` (or `$TAILSCALE_KEY`), set
+`--tailscale.client.id` and `--tailscale.client.secret` (or
+`$TAILSCALE_CLIENT_ID` and `$TAILSCALE_CLIENT_SECRET`, respectively).
+
+### Zeroconf/Avahi/mDNS/Bonjour
+
+You can enable this using the `--zeroconf.enabled` flag:
+
+```bash
+wishlist --zeroconf.enabled
+```
+
+Optionally, you can also specify a timeout with `--zeroconf.timeout` and, which
+domain to look for with `--zeroconf.domain`.
+
+Wishlist will look for `_ssh._tcp` services in the given domain.
+
+You can use the [Hints](#hints) to change the connection settings.
+
+### SRV records
+
+You can set Wishlist up to find nodes from DNS `SRV` records:
+
+```bash
+wishlist --srv.domain example.com
+```
+
+By default, Wishlist will set the name of the endpoint to the `SRV` target.
+You can, however, customize that with a `TXT` record in the following format:
+
+```txt
+wishlist.name full.address:22=thename
+```
+
+So, in this case, a `SRV` record pointing to `full.address` on port `22` will
+get the name `thename`.
+
+### Hints
+
+You can use the `hints` key in the YAML configuration file to hint settings into
+discovered endpoints.
+
+Check the [example configuration file](/_example/config.yaml) to learn
+what options are available.
+
+If you're using a SSH configuration file as the Wishlist configuration file,
+it'll try to match the hosts with the rules in the given configuration.
+Otherwise, the services will simply be added to the list.
+
+The difference is that if a hints themselves won't show in the TUI, as of hosts
+in the SSH configuration will.
+
 ## Running it
 
-Wishlist will read and store all its information in a `.wishlist` folder in the current working directory:
+Wishlist will read and store all its information in a `.wishlist` folder in the
+current working directory:
 
 - the server keys
 - the client keys
@@ -161,11 +259,19 @@ The config files are tried in the following order:
 - `$HOME/.ssh/config`
 - `/etc/ssh/ssh_config`
 
-[^1]: i.e. `[[user config dir]]`: On Unix systems, it will be `$XDG_CONFIG_HOME` as specified by https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html if non-empty, else `$HOME/.config`. On Darwin, it will be `$HOME/Library/Application Support`. On Windows, it will be `%AppData%`. On Plan 9, it will be `$home/lib`.
+[^1]:
+    i.e. `[[user config dir]]`: On Unix systems, it will be `$XDG_CONFIG_HOME`
+    as specified by
+    https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+    if non-empty, else `$HOME/.config`. On Darwin, it will be
+    `$HOME/Library/Application Support`. On Windows, it will be `%AppData%`.
+    On Plan 9, it will be `$home/lib`.
 
-The first one that is loaded and parsed without errors will be used.
-This means that if you have your common used hosts in your `~/.ssh/config`, you can simply run `wishlist` and get it running right away.
-It also means that if you don't want that, you can pass a path to `-config`, and it can be either a YAML, or a SSH config file.
+The first one that is loaded and parsed without errors will be used. This means
+that if you have your common used hosts in your `~/.ssh/config`, you can simply
+run `wishlist` and get it running right away. It also means that if you don't
+want that, you can pass a path to `-config`, and it can be either a YAML, or a
+SSH config file.
 
 ### Using the binary
 
@@ -184,6 +290,25 @@ docker run \
   docker.io/charmcli/wishlist:latest
 ```
 
+### Supported SSH Options
+
+Not all SSH options are currently supported.
+Here's a list of the ones that are:
+
+- `User`
+- `Hostname`
+- `Port`
+- `IdentityFiles`
+- `ForwardAgent`
+- `RequestTTY`
+- `RemoteCommand`
+- `SendEnv`
+- `SetEnv`
+- `ConnectTimeout`
+- `Include`
+- `PreferredAuthentications`
+- `ProxyJump`
+
 ## Acknowledgments
 
 The gif above shows a lot of [Maas Lalani’s](https://github.com/maaslalani) [confeTTY](https://github.com/maaslalani/confetty).
@@ -192,18 +317,19 @@ The gif above shows a lot of [Maas Lalani’s](https://github.com/maaslalani) [c
 
 We’d love to hear your thoughts on this project. Feel free to drop us a note!
 
-* [Twitter](https://twitter.com/charmcli)
-* [The Fediverse](https://mastodon.social/@charmcli)
-* [Discord](https://charm.sh/chat)
+- [Twitter](https://twitter.com/charmcli)
+- [The Fediverse](https://mastodon.social/@charmcli)
+- [Discord](https://charm.sh/chat)
 
 ## License
 
 [MIT](/LICENSE)
 
-***
+---
 
 Part of [Charm](https://charm.sh).
 
 <a href="https://charm.sh/"><img alt="The Charm logo" src="https://stuff.charm.sh/charm-badge.jpg" width="400"></a>
 
+<!--prettier-ignore-->
 Charm热爱开源 • Charm loves open source

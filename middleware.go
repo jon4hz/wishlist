@@ -2,13 +2,14 @@ package wishlist
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
+	bm "github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wishlist/blocking"
 	"github.com/charmbracelet/wishlist/multiplex"
 	"github.com/muesli/termenv"
@@ -47,7 +48,7 @@ func cmdsMiddleware(endpoints []*Endpoint) wish.Middleware {
 
 // handles the listing and handoff of apps.
 func listingMiddleware(config *Config, endpointRelay *broadcast.Relay[[]*Endpoint]) wish.Middleware {
-	return func(h ssh.Handler) ssh.Handler {
+	return func(ssh.Handler) ssh.Handler {
 		return func(s ssh.Session) {
 			lipgloss.SetColorProfile(termenv.ANSI256)
 
@@ -60,14 +61,18 @@ func listingMiddleware(config *Config, endpointRelay *broadcast.Relay[[]*Endpoin
 
 			errch := make(chan error, 1)
 			appch := make(chan bool, 1)
-			model := NewListing(config.Endpoints, &remoteClient{
-				session: s,
-				stdin:   handoffStdin,
-				cleanup: func() {
-					listStdin.Reset()
-					handoffStdin.Reset()
+			model := NewListing(
+				config.Endpoints,
+				&remoteClient{
+					session: s,
+					stdin:   handoffStdin,
+					cleanup: func() {
+						listStdin.Reset()
+						handoffStdin.Reset()
+					},
 				},
-			})
+				bm.MakeRenderer(s),
+			)
 			p := tea.NewProgram(
 				model,
 				tea.WithInput(blocking.New(listStdin)),
@@ -87,8 +92,15 @@ func listingMiddleware(config *Config, endpointRelay *broadcast.Relay[[]*Endpoin
 // - errch: when the program errors
 // - session's context done: when the session is terminated by either party
 // - winch: when the terminal is resized
+// - endpointsch: new endpoint list provided
 // and handles them accordingly.
-func listenAppEvents(s ssh.Session, p *tea.Program, donech <-chan bool, msgch <-chan []*Endpoint, errch <-chan error) {
+func listenAppEvents(
+	s ssh.Session,
+	p *tea.Program,
+	donech <-chan bool,
+	endpointsch <-chan []*Endpoint,
+	errch <-chan error,
+) {
 	_, winch, _ := s.Pty()
 	for {
 		select {
@@ -103,7 +115,7 @@ func listenAppEvents(s ssh.Session, p *tea.Program, donech <-chan bool, msgch <-
 			if p != nil {
 				p.Send(tea.WindowSizeMsg{Width: w.Width, Height: w.Height})
 			}
-		case m := <-msgch:
+		case m := <-endpointsch:
 			if p != nil {
 				p.Send(SetEndpointsMsg{Endpoints: m})
 			}
@@ -127,6 +139,6 @@ func mustConnect(session ssh.Session, e *Endpoint) {
 		wish.Fatal(session, fmt.Errorf("wishlist: %w", err))
 		return // unreachable
 	}
-	fmt.Fprintf(session, "wishlist: closed connection to %q (%s)\n\r", e.Name, e.Address)
+	fmt.Fprintf(session, "wishlist: closed connection to %q (%s)\n\r", e.Name, e.Address) //nolint: errcheck
 	_ = session.Exit(0)
 }
